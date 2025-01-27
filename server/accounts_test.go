@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -176,36 +177,79 @@ func TestAccountIsolationExportImport(t *testing.T) {
 		name     string
 		exp, imp string
 		pubSubj  string
+		scoped   bool
 	}{
 		{
 			name: "export literal, import literal",
 			exp:  "foo", imp: "foo",
 			pubSubj: "foo",
+			scoped: false,
 		},
 		{
 			name: "export full wildcard, import literal",
 			exp:  "foo.>", imp: "foo.bar",
 			pubSubj: "foo.bar",
+			scoped: false,
 		},
 		{
 			name: "export full wildcard, import sublevel full wildcard",
 			exp:  "foo.>", imp: "foo.bar.>",
 			pubSubj: "foo.bar.whizz",
+			scoped: false,
 		},
 		{
 			name: "export full wildcard, import full wildcard",
 			exp:  "foo.>", imp: "foo.>",
 			pubSubj: "foo.bar",
+			scoped: false,
 		},
 		{
 			name: "export partial wildcard, import partial wildcard",
 			exp:  "foo.*", imp: "foo.*",
 			pubSubj: "foo.bar",
+			scoped: false,
 		},
 		{
 			name: "export mid partial wildcard, import mid partial wildcard",
 			exp:  "foo.*.bar", imp: "foo.*.bar",
 			pubSubj: "foo.whizz.bar",
+			scoped: false,
+		},
+		{
+			name: "scoped export literal, import literal",
+			exp:  "foo", imp: "foo",
+			pubSubj: "foo",
+			scoped: true,
+		},
+		{
+			name: "scoped export full wildcard, import literal",
+			exp:  "foo.>", imp: "foo.bar",
+			pubSubj: "foo.bar",
+			scoped: true,
+		},
+		{
+			name: "scoped export full wildcard, import sublevel full wildcard",
+			exp:  "foo.>", imp: "foo.bar.>",
+			pubSubj: "foo.bar.whizz",
+			scoped: true,
+		},
+		{
+			name: "scoped export full wildcard, import full wildcard",
+			exp:  "foo.>", imp: "foo.>",
+			pubSubj: "foo.bar",
+			scoped: true,
+		},
+		{
+			name: "scoped export partial wildcard, import partial wildcard",
+			exp:  "foo.*", imp: "foo.*",
+			pubSubj: "foo.bar",
+			scoped: true,
+		},
+		{
+			name: "scoped export mid partial wildcard, import mid partial wildcard",
+			exp:  "foo.*.bar", imp: "foo.*.bar",
+			pubSubj: "foo.whizz.bar",
+			scoped: true,
 		},
 	}
 	for _, c := range cases {
@@ -230,6 +274,14 @@ func TestAccountIsolationExportImport(t *testing.T) {
 					Type:    jwt.Stream,
 				})
 			}
+			var expSkp nkeys.KeyPair
+			if c.scoped {
+				expSkp, _ = nkeys.CreateAccount()
+				scope := jwt.NewUserScope()
+				scope.Key, _ = expSkp.PublicKey()
+				scope.Role = "TEST"
+				accExpClaims.SigningKeys.AddScopedSigner(scope)
+			}
 			accExpJWT, err := accExpClaims.Encode(oKp)
 			require_NoError(t, err)
 			addAccountToMemResolver(s, accExpPub, accExpJWT)
@@ -245,15 +297,43 @@ func TestAccountIsolationExportImport(t *testing.T) {
 					Type:    jwt.Stream,
 				})
 			}
+			var impSkp nkeys.KeyPair
+			if c.scoped {
+				impSkp, _ = nkeys.CreateAccount()
+				scope := jwt.NewUserScope()
+				scope.Key, _ = impSkp.PublicKey()
+				scope.Role = "TEST"
+				accImpClaims.SigningKeys.AddScopedSigner(scope)
+			}
 			accImpJWT, err := accImpClaims.Encode(oKp)
 			require_NoError(t, err)
 			addAccountToMemResolver(s, accImpPub, accImpJWT)
 
+			var expUser nats.Option
+			if c.scoped {
+				exnuc := jwt.NewUserClaims("test")
+				exnuc.SetScoped(true)
+				exnuc.IssuerAccount = accExpPub
+				expUser = createUserCredsEx(t, exnuc, expSkp)
+			} else {
+				expUser = createUserCreds(t, nil, accExpPair)
+			}
+
+			var impUser nats.Option
+			if c.scoped && false {
+				imnuc := jwt.NewUserClaims("test")
+				imnuc.SetScoped(true)
+				imnuc.IssuerAccount = accImpPub
+				impUser = createUserCredsEx(t, imnuc, impSkp)
+			} else {
+				impUser = createUserCreds(t, nil, accImpPair)
+			}
+
 			// Connect with different accounts.
-			ncExp := natsConnect(t, s.ClientURL(), createUserCreds(t, nil, accExpPair),
+			ncExp := natsConnect(t, s.ClientURL(), expUser,
 				nats.Name(fmt.Sprintf("nc-exporter-%s", c.exp)))
 			defer ncExp.Close()
-			ncImp := natsConnect(t, s.ClientURL(), createUserCreds(t, nil, accImpPair),
+			ncImp := natsConnect(t, s.ClientURL(), impUser,
 				nats.Name(fmt.Sprintf("nc-importer-%s", c.imp)))
 			defer ncImp.Close()
 
@@ -262,41 +342,42 @@ func TestAccountIsolationExportImport(t *testing.T) {
 				t.Logf("exported=%q; imported=%q", c.exp, c.imp)
 			}
 		})
+		if c.scoped == false {
+			t.Run(fmt.Sprintf("%s conf", c.name), func(t *testing.T) {
+				// Setup NATS server.
+				cf := createConfFile(t, []byte(fmt.Sprintf(`
+					port: -1
 
-		t.Run(fmt.Sprintf("%s conf", c.name), func(t *testing.T) {
-			// Setup NATS server.
-			cf := createConfFile(t, []byte(fmt.Sprintf(`
-				port: -1
+					accounts: {
+						accExp: {
+							users: [{user: accExp, password: accExp}]
+							exports: [{stream: %q}]
+						}
+						accImp: {
+							users: [{user: accImp, password: accImp}]
+							imports: [{stream: {account: accExp, subject: %q}}]
+						}
+					}
+				`,
+					c.exp, c.imp,
+				)))
+				s, _ := RunServerWithConfig(cf)
+				defer s.Shutdown()
 
-				accounts: {
-					accExp: {
-						users: [{user: accExp, password: accExp}]
-						exports: [{stream: %q}]
-					}
-					accImp: {
-						users: [{user: accImp, password: accImp}]
-						imports: [{stream: {account: accExp, subject: %q}}]
-					}
+				// Connect with different accounts.
+				ncExp := natsConnect(t, s.ClientURL(), nats.UserInfo("accExp", "accExp"),
+					nats.Name(fmt.Sprintf("nc-exporter-%s", c.exp)))
+				defer ncExp.Close()
+				ncImp := natsConnect(t, s.ClientURL(), nats.UserInfo("accImp", "accImp"),
+					nats.Name(fmt.Sprintf("nc-importer-%s", c.imp)))
+				defer ncImp.Close()
+
+				checkIsolation(t, c.pubSubj, ncExp, ncImp)
+				if t.Failed() {
+					t.Logf("exported=%q; imported=%q", c.exp, c.imp)
 				}
-			`,
-				c.exp, c.imp,
-			)))
-			s, _ := RunServerWithConfig(cf)
-			defer s.Shutdown()
-
-			// Connect with different accounts.
-			ncExp := natsConnect(t, s.ClientURL(), nats.UserInfo("accExp", "accExp"),
-				nats.Name(fmt.Sprintf("nc-exporter-%s", c.exp)))
-			defer ncExp.Close()
-			ncImp := natsConnect(t, s.ClientURL(), nats.UserInfo("accImp", "accImp"),
-				nats.Name(fmt.Sprintf("nc-importer-%s", c.imp)))
-			defer ncImp.Close()
-
-			checkIsolation(t, c.pubSubj, ncExp, ncImp)
-			if t.Failed() {
-				t.Logf("exported=%q; imported=%q", c.exp, c.imp)
-			}
-		})
+			})
+		}
 	}
 }
 
@@ -3669,4 +3750,242 @@ func TestAccountServiceAndStreamExportDoubleDelivery(t *testing.T) {
 	nc.Publish("DW.test.123", []byte("test"))
 	time.Sleep(200 * time.Millisecond)
 	require_Equal(t, msgs.Load(), 1)
+}
+
+func TestAccountAcrossLeafIsolationExportImport(t *testing.T) {
+	checkIsolation := func(t *testing.T, pubSubj, pubSubj2 string, ncExp, ncImp *nats.Conn) {
+		pubSubj_count := int32(0)
+		pubSubj2_count := int32(0)
+		count := int32(0)
+		ch := make(chan struct{}, 1)
+		if _, err := ncImp.Subscribe(pubSubj, func(m *nats.Msg) {
+			atomic.AddInt32(&pubSubj_count, 1)
+			if n := atomic.AddInt32(&count, 1); n == 2 {
+				ch <- struct{}{}
+			}
+		}); err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+		count2 := int32(0)
+		ch2 := make(chan struct{}, 1)
+		if _, err := ncExp.Subscribe(pubSubj2, func(m *nats.Msg) {
+			atomic.AddInt32(&pubSubj2_count, 1)
+			if n := atomic.AddInt32(&count2, 1); n == 2 {
+				ch2 <- struct{}{}
+			}
+		}); err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+		ncImp.Flush()
+		ncExp.Flush()
+
+		if err := ncExp.Publish(pubSubj, []byte(fmt.Sprintf("ncExp pub %s", pubSubj))); err != nil {
+			t.Fatal(err)
+		}
+		if err := ncImp.Publish(pubSubj, []byte(fmt.Sprintf("ncImp pub %s", pubSubj))); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := ncExp.Publish(pubSubj2, []byte(fmt.Sprintf("ncExp pub %s", pubSubj2))); err != nil {
+			t.Fatal(err)
+		}
+		if err := ncImp.Publish(pubSubj2, []byte(fmt.Sprintf("ncImp pub %s", pubSubj2))); err != nil {
+			t.Fatal(err)
+		}
+
+		// Wait for at least the 3 expected messages
+		select {
+		case <-ch:
+		case <-ch2:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("Expected 2 messages, got %v %v", atomic.LoadInt32(&count), atomic.LoadInt32(&count2))
+		}
+		// But now wait a bit to see if subscription receives more than expected.
+		time.Sleep(50 * time.Millisecond)
+
+		if atomic.LoadInt32(&pubSubj_count) != 2 {
+			t.Errorf("unexpected receive count for subject %q, got=%d, want=%d", pubSubj, atomic.LoadInt32(&pubSubj_count), 2)
+		}
+		if atomic.LoadInt32(&pubSubj2_count) != 2 {
+			t.Errorf("unexpected receive count for subject2 %q, got=%d, want=%d", pubSubj2, atomic.LoadInt32(&pubSubj2_count), 2)
+		}
+	}
+
+	cases := []struct {
+		name     string
+		exp, imp string
+		leaf_exp, leaf_imp string
+		pubSubj  string
+		pubSubj2  string
+		scoped   bool
+	}{
+		{
+			name: "export literal, import literal",
+			exp:  "foo", imp: "foo",
+			leaf_exp:  "bar.baz", leaf_imp: "bar.baz",
+			pubSubj: "foo",
+			pubSubj2: "bar.baz",
+			scoped: false,
+		},
+		{
+			name: "scoped export literal, import literal",
+			exp:  "foo", imp: "foo",
+			leaf_exp:  "bar.baz", leaf_imp: "bar.baz",
+			pubSubj: "foo",
+			pubSubj2: "bar.baz",
+			scoped: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(fmt.Sprintf("%s jwt", c.name), func(t *testing.T) {
+			// Setup NATS server.
+			kp, _ := nkeys.FromSeed(oSeed)
+			pub, _ := kp.PublicKey()
+			opts := DefaultOptions()
+			opts.TrustedKeys = []string{pub}
+			opts.LeafNode.Host = "127.0.0.1"
+			opts.LeafNode.Port = -1
+
+			s, err := NewServer(opts)
+			if err != nil || s == nil {
+				t.Fatalf(fmt.Sprintf("No NATS Server object returned: %v", err))
+			}
+
+			s.ConfigureLogger()
+
+			buildMemAccResolver(s)
+			// Setup importer account.
+			accImpPair, accImpPub := createKey(t)
+
+			// Setup exporter account.
+			accExpPair, accExpPub := createKey(t)
+			accExpClaims := jwt.NewAccountClaims(accExpPub)
+			if c.exp != "" {
+				accExpClaims.Limits.WildcardExports = true
+				accExpClaims.Exports.Add(&jwt.Export{
+					Name:    fmt.Sprintf("%s-stream-export", c.exp),
+					Subject: jwt.Subject(c.exp),
+					Type:    jwt.Stream,
+				})
+				accExpClaims.Imports.Add(&jwt.Import{
+					Name:    fmt.Sprintf("%s-stream-import", c.leaf_imp),
+					Subject: jwt.Subject(c.leaf_imp),
+					LocalSubject: jwt.RenamingSubject(c.leaf_imp),
+					Account:  accImpPub,
+					Type:     jwt.Stream,
+				})
+			}
+			var expSkp nkeys.KeyPair
+			if c.scoped {
+				expSkp, _ = nkeys.CreateAccount()
+				scope := jwt.NewUserScope()
+				scope.Key, _ = expSkp.PublicKey()
+				scope.Role = "TEST"
+				accExpClaims.SigningKeys.AddScopedSigner(scope)
+			}
+			accExpJWT, err := accExpClaims.Encode(oKp)
+			require_NoError(t, err)
+			addAccountToMemResolver(s, accExpPub, accExpJWT)
+
+			accImpClaims := jwt.NewAccountClaims(accImpPub)
+			if c.imp != "" {
+				accImpClaims.Imports.Add(&jwt.Import{
+					Name:    fmt.Sprintf("%s-stream-import", c.imp),
+					Subject: jwt.Subject(c.imp),
+					LocalSubject: jwt.RenamingSubject(c.imp),
+					Account: accExpPub,
+					Type:    jwt.Stream,
+				})
+				accImpClaims.Exports.Add(&jwt.Export{
+					Name:    fmt.Sprintf("%s-stream-import", c.leaf_exp),
+					Subject: jwt.Subject(c.leaf_exp),
+					Type:    jwt.Stream,
+				})
+			}
+			var impSkp nkeys.KeyPair
+			if c.scoped {
+				impSkp, _ = nkeys.CreateAccount()
+				scope := jwt.NewUserScope()
+				scope.Key, _ = impSkp.PublicKey()
+				scope.Role = "TEST"
+				accImpClaims.SigningKeys.AddScopedSigner(scope)
+			}
+			accImpJWT, err := accImpClaims.Encode(oKp)
+			require_NoError(t, err)
+			addAccountToMemResolver(s, accImpPub, accImpJWT)
+
+			var expCreds string
+			if c.scoped {
+				exnuc := jwt.NewUserClaims("test")
+				kp, _ := nkeys.CreateUser()
+				exnuc.Subject, _ = kp.PublicKey()
+				exnuc.SetScoped(true)
+				exnuc.IssuerAccount = accExpPub
+				ujwt, _ := exnuc.Encode(expSkp)
+				seed, _ := kp.Seed()
+				expCreds = genCredsFile(t, ujwt, seed)
+			} else {
+				expCreds = newUser(t, accExpPair)
+			}
+
+			var impUser nats.Option
+			if c.scoped && false {
+				imnuc := jwt.NewUserClaims("test")
+				imnuc.SetScoped(true)
+				imnuc.IssuerAccount = accImpPub
+				impUser = createUserCredsEx(t, imnuc, impSkp)
+			} else {
+				impUser = createUserCreds(t, nil, accImpPair)
+			}
+			// Run server in Go routine.
+			s.Start()
+			defer s.Shutdown()
+			if err := s.readyForConnections(5 * time.Second); err != nil {
+				t.Fatal(err)
+			}
+
+			u, _ := url.Parse(fmt.Sprintf("nats://%s:%d", opts.LeafNode.Host, opts.LeafNode.Port))
+
+			foo := NewAccount("foo")
+			lu := &User{
+				Username: "Q",
+				Password: "Q",
+				Account: foo,
+			}
+			lo := DefaultOptions()
+			lo.Accounts = []*Account{foo}
+			lo.Users = []*User{lu}
+			lo.Cluster.Name = "xyz"
+			lo.LeafNode.ReconnectInterval = 10 * time.Millisecond
+			lo.LeafNode.Remotes = []*RemoteLeafOpts{
+				{
+					LocalAccount: "foo",
+					URLs:         []*url.URL{u},
+					Credentials:  expCreds,
+				},
+			}
+
+			ls := RunServer(lo)
+			defer ls.Shutdown()
+			if err := ls.readyForConnections(15 * time.Second); err != nil {
+				t.Fatal(err)
+			}
+
+			checkLeafNodeConnected(t, ls)
+			// Connect with different accounts.
+			ncExp := natsConnect(t, ls.ClientURL(), nats.UserInfo("Q", "Q"),
+				nats.Name(fmt.Sprintf("nc-exporter-%s", c.exp)))
+			defer ncExp.Close()
+
+			ncImp := natsConnect(t, s.ClientURL(), impUser,
+				nats.Name(fmt.Sprintf("nc-importer-%s", c.imp)))
+			defer ncImp.Close()
+
+			checkIsolation(t, c.pubSubj, c.pubSubj2, ncExp, ncImp)
+			if t.Failed() {
+				t.Logf("exported=%q; imported=%q", c.exp, c.imp)
+				t.Logf("leaf exported=%q; imported=%q", c.leaf_exp, c.leaf_imp)
+			}
+		})
+	}
 }
