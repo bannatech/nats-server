@@ -1522,14 +1522,17 @@ func (js *jetStream) metaSnapshotPB() ([]byte, error) {
 					continue
 				}
 
-				res[i] = &natsserverpb.StreamSource{
+				c := &natsserverpb.StreamSource{
 					Name:              ss.Name,
 					OptStartSeq:       ss.OptStartSeq,
-					OptStartTime:      timestamppb.New(*ss.OptStartTime),
 					FilterSubject:     ss.FilterSubject,
 					SubjectTransforms: subjectTransformToPB(ss.SubjectTransforms...),
 					External:          externalToPB(ss.External),
 				}
+				if ss.OptStartTime != nil {
+					c.OptStartTime = timestamppb.New(*ss.OptStartTime)
+				}
+				res[i] = c
 			}
 			return res
 		}
