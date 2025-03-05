@@ -11358,7 +11358,7 @@ func TestNoRaceJetStreamClusterLargeMetaSnapshotTiming(t *testing.T) {
 	log.Printf("JSON Took %v to snap meta with size of %v\n", time.Since(start), friendlyBytes(len(snap)))
 
 	start = time.Now()
-	snap, err = js.metaSnapshotPB()
+	snap, err = js.metaSnapshot()
 	require_NoError(t, err)
 	// require_NoError(t, n.InstallSnapshot(snap))
 	// t.Logf("Took %v to snap meta with size of %v\n", time.Since(start), friendlyBytes(len(snap)))

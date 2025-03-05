@@ -33,12 +33,6 @@ plugins:
     out: ./gen
     opt:
       - paths=source_relative
-
-  - plugin: natsrpc
-    out: ./gen
-    opt:
-      - paths=source_relative
-
   #- plugin: buf.build/connectrpc/es:v1.1.4
   #  out: ../example/src/api
   #  opt:

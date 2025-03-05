@@ -1394,7 +1394,7 @@ func (js *jetStream) clusterStreamConfig(accName, streamName string) (StreamConf
 	return StreamConfig{}, false
 }
 
-func (js *jetStream) metaSnapshot() ([]byte, error) {
+func (js *jetStream) metaSnapshotOld() ([]byte, error) {
 	start := time.Now()
 	js.mu.RLock()
 	s := js.srv
@@ -1462,7 +1462,7 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 	return snap, nil
 }
 
-func (js *jetStream) metaSnapshotPB() ([]byte, error) {
+func (js *jetStream) metaSnapshot() ([]byte, error) {
 	start := time.Now()
 	js.mu.RLock()
 	s := js.srv
@@ -1475,6 +1475,43 @@ func (js *jetStream) metaSnapshotPB() ([]byte, error) {
 
 	streams := &natsserverpb.StreamMetadata{
 		StreamAssignments: make([]*natsserverpb.WriteableStreamAssignment, 0, nsa),
+	}
+
+	clientInfoToPB := func(c *ClientInfo) *natsserverpb.ClientInfo {
+		if c == nil {
+			return nil
+		}
+
+		ci := &natsserverpb.ClientInfo{
+			Host:          c.Host,
+			Id:            c.ID,
+			Account:       c.Account,
+			Service:       c.Service,
+			User:          c.User,
+			Name:          c.Name,
+			Lang:          c.Lang,
+			Version:       c.Version,
+			Rtt:           durationpb.New(c.RTT),
+			Server:        c.Server,
+			Cluster:       c.Cluster,
+			Alternatiives: c.Alternates,
+			Jwt:           c.Jwt,
+			IssuerKey:     c.IssuerKey,
+			NameTag:       c.NameTag,
+			Tags:          c.Tags,
+			Kind:          c.Kind,
+			ClientType:    c.ClientType,
+			MqttClient:    c.MQTTClient,
+			Nonce:         c.Nonce,
+		}
+		if c.Start != nil {
+			ci.Start = timestamppb.New(*c.Start)
+		}
+		if c.Stop != nil {
+			ci.Stop = timestamppb.New(*c.Stop)
+		}
+
+		return ci
 	}
 
 	streamCfgToPB := func(cfg *StreamConfig) *natsserverpb.StreamConfig {
@@ -1618,7 +1655,6 @@ func (js *jetStream) metaSnapshotPB() ([]byte, error) {
 	for _, asa := range cc.streams {
 		for _, sa := range asa {
 			wsa := &natsserverpb.WriteableStreamAssignment{
-				// Client:    sa.Client.forAssignmentSnapPB(),
 				Created:   timestamppb.New(sa.Created),
 				Config:    streamCfgToPB(sa.Config),
 				Group:     raftGroupToPB(sa.Group),
@@ -1626,16 +1662,21 @@ func (js *jetStream) metaSnapshotPB() ([]byte, error) {
 				Consumers: make([]*natsserverpb.ConsumerAssignment, 0, len(sa.consumers)),
 			}
 
+			if sa.Client != nil {
+				wsa.Client = clientInfoToPB(sa.Client)
+			}
 			for _, ca := range sa.consumers {
 				if ca.pending {
 					continue
 				}
 				cca := &natsserverpb.ConsumerAssignment{
-					Name:   ca.Name,
-					Stream: wsa.Config.Name,
-					// Client: ca.Client.forAssignmentSnapPB(),
-					// Subject: _EMPTY_,
-					// Reply:   _EMPTY_,
+					Name:    ca.Name,
+					Stream:  wsa.Config.Name,
+					Subject: _EMPTY_,
+					Reply:   _EMPTY_,
+				}
+				if ca.Client != nil {
+					cca.ClientInfo = clientInfoToPB(ca.Client)
 				}
 				wsa.Consumers = append(wsa.Consumers, cca)
 				nca++
